@@ -7,8 +7,8 @@
 #include <linux/syscalls.h>
 #include <linux/kallsyms.h>
 #include <linux/spinlock.h>
-#include <asm/pgtable.h>
 #include "barrier.h"
+#include "helper.h"
 #include <linux/ipc.h>
 #include <linux/idr.h>
 #include <linux/gfp.h>
@@ -17,93 +17,157 @@
 #include <linux/slab.h>
 #include <linux/gfp.h>
 #include <linux/ipc_namespace.h>
-#include <linux/ipc.h>
 #include <asm-generic/current.h>
+#include <asm-generic/pgtable.h>
 
-unsigned long** find_system_call_table();
+void enable_write_protected_mode(unsigned long* cr0);
+void disable_write_protected_mode(unsigned long* cr0);
 
 /*
- * In case the symbol of the system call table is
- * exported and available in "/proc/kallsyms", we
- * get its address from it
+ * Pointer to the ipc_ids data structure used to keep track of  all the instances
+ * of the barrier on the basis of their ids
  */
 
-#ifdef CONFIG_KALLSYMS
-unsigned long** find_system_call_table(){
-        return kallsyms_lookup_name("sys_call_table");
+struct ipc_ids* barrier_ids;
+
+/*
+ * Lock the "barrier_ipc_perm" structure within an instance of
+ * barrier
+ *
+ * @barrier pointer to the barrier whose barrier_ipc_perm has to
+ * be blocked
+ */
+
+void barrier_lock(struct barrier_struct* barrier){
+        struct barrier_ipc_perm* barrier_ipc_perm=&(barrier->barrier_perm);
+        spin_lock(&(barrier_ipc_perm->lock));
 }
-#else
+
 /*
- * If it's not exported, we have to scan the whole kernel
- * address space and we stop as we find an entry corresponding
- * to the system call "sys_close (one of the few that are exported)
+ * Unlock the "barrier_ipc_perm" structure within an instance of
+ * barrier
+ *
+ * @barrier: pointer to the barrier whose barrier_ipc_perm has to
+ * be blocked
  */
-unsigned long** find_system_call_table(){
-        unsigned long** sys_table;
-        unsigned long offset = PAGE_OFFSET;
-        while(offset < ULONG_MAX){
-                sys_table = (unsigned long **)offset;
-                if(sys_table[__NR_close] == (unsigned long *)sys_close)
-                        return sys_table;
-                offset += sizeof(void *);
+
+void barrier_unlock(struct barrier_struct* barrier){
+        struct barrier_ipc_perm* barrier_ipc_perm=&(barrier->barrier_perm);
+        spin_unlock(&(barrier_ipc_perm->lock));
+}
+
+/*
+ * Custom version of the function "ipc_addid" of the IPC subsystem.
+ * Just like the latter, add a new entry (namely allocate a new ID)
+ * in the structure that manages the IDs for the barrier (idr mapping)
+ * and return it. The newly created entry is returned in a locked
+ * state; also this function is invoked holding the lock on the
+ * ipc_ids structure.
+ *
+ * @ids: pointer to the "ipc_ids" structure that manages ids of barriers
+ * @new: pointer to the newly created barrier that has to be assigned a
+ *       new ID
+ *
+ * Returns a unique identifier for the new instance of barrier
+ * This is calculated (as in IPC subsystem) as follows:
+ *
+ * id=s*SEQ_MULTIPLIER+i
+ *
+ * where "s" is a "slot sequence number" relative to the barrier and i is the
+ * id returned by the IDR API
+ * SEQ_MULTIPLIER is the maximum number of barriers allowed:32768
+ */
+
+int barrier_addid(struct ipc_ids *ids, struct barrier_ipc_perm *new){
+
+        /*
+         * Final ID and error code to be returned (either the former or
+         * the latter)
+         */
+
+        int id, err,seq;
+
+        /*
+         * Check whether the maximum number of allocated IDs has already
+         * been reached: if so return the code error -ENOSPC (no space left)
+         */
+
+        if(ids->in_use>=BARRIER_IDS_MAX)
+                return -ENOSPC;
+
+        /*
+         * Initialize a lock on the barrier_ipc_perm in order to
+         * synchronize access to the idr data structure
+         */
+
+        spin_lock_init(&new->lock);
+
+        /*
+         * Acquire the lock on the barrier_ipc_perm structure before assigning it
+         * a new ID: access to IDR API has to be serialized
+         */
+
+        spin_lock(&new->lock);
+
+        /*
+         * Get next available ID for the new instance of barrier using the
+         * idr subsystem; the third parameter is initialized to the new ID
+         * assigned.
+         *
+         * The function returns -ENOSPC in case of error, 0 otherwise
+         */
+
+        err = idr_get_new(&ids->ipcs_idr, new, &id);
+
+        /*
+         * In case of error, unlock the barrier and return the error code
+         */
+
+        if(err){
+                spin_unlock(&new->lock);
+                return err;
         }
-}
-#endif
-
-/*
- * Finds the page corresponding to the given address and
- * set its R/W attribute
- */
-
-void make_page_writable(unsigned long address){
 
         /*
-         * Get the address of the page
+         * Increment the counter of ids in use by one
          */
 
-        pte_t* page;
-        int level=0;
-        if(!(page = lookup_address(address, &level)))
-                return -1;
+        ++(ids->in_use);
 
         /*
-         * Set writable
+         * Get the actual sequence number of barriers: if it's bigger the
+         * maximum sequence number, reset it to 0
          */
 
-        set_pte_atomic(page, pte_mkwrite(*page));
-}
-
-/*
- * Finds the page corresponding to the given address and
- * set its R/W attribute
- */
-
-void make_page_readable(unsigned long address){
+        seq=ids->seq;
+        if(seq>ids->seq_max)
+                ids->seq=0;
 
         /*
-         * Get the address of the page
+         * Assign the ID to the barrier
          */
 
-        pte_t* page;
-        int level=0;
-        if(!(page = lookup_address(address, &level)))
-                return -1;
+        new->id=ids->seq*BARRIER_IDS_MAX+id;
 
-        /*
-         * Set writable
-         */
+        return  id;
 
-        set_pte_atomic(page, pte_clear_flags(*page, _PAGE_RW));
 }
 
 /*
- * Function to create a new instance of a barrier, given the
- * namespace a few parameters: flags and key
+ * Function to get a new instance of a barrier
+ *
+ * @params: flags and key associated to the new barrier
+ *
  * Returns the IPC identifier of the newly created barrier or
- * some error code in case something goes wrong
+ * some error code in case something goes wrong.
+ *
+ * This function is called while holding the r/w semaphore of
+ * the global (shared among all barriers) ipc_ids structure
+ * as a writer
+ *
  */
 
-int newbarrier(struct ipc_params * params){
+int newbarrier(struct barrier_params * params){
 
         /*
          * The unique IPC identifier of the new barrier; recall that
@@ -112,13 +176,7 @@ int newbarrier(struct ipc_params * params){
          * the same id as this barrier we are creating
          */
 
-        int id;
-
-        /*
-         * The return value of the function
-         */
-
-        int retval;
+        int id,i;
 
         /*
          * The structure representing the barrier we are creating
@@ -140,18 +198,19 @@ int newbarrier(struct ipc_params * params){
         int barrierflags = params->flg;
 
         /*
-         * Allocate the barrier
+         * Allocate the memory for the barrier
          */
 
-        barrier = kmalloc(sizeof (*barrier),GFP_KERNEL);
+        barrier = (struct barrier_struct *)kmalloc(sizeof (*barrier),GFP_KERNEL);
 
         /*
-         * Return error in case there's not enough memory
+         * Return error in case there's not enough memory left
+         * for the barrier
          */
 
         if (!barrier) {
                 return -ENOMEM;
-                }
+        }
 
         /*
          * Initialize dynamically allocated memory
@@ -167,50 +226,61 @@ int newbarrier(struct ipc_params * params){
         barrier->barrier_perm.key = key;
 
         /*
-         * We don't care about security
+         * Get a new id for the new instance of barrier from the
+         * structure "barrier_ids"
+         * In case a free ID is found, the barrier is locked and
+         * the ID is returned.
          */
 
-        barrier->barrier_perm.security = NULL;
+        id = barrier_addid(&barrier_ids, &barrier->barrier_perm);
 
         /*
-         * Set the IPC identifier (id) for the new barrier
+         * If the ID is set to -1, it means something went wrong with
+         * the allocation of the ID for the new barrier: since the ID
+         * is mandatory for the instance of barrier, we free the instance
+         * and return the ID as error code
          */
 
-        id = ipc_addid(&sem_ids(ns), &sma->sem_perm, ns->sc_semmni);
-        if (id < 0) {
-                security_sem_free(sma);
-                ipc_rcu_putref(sma);
+        if(id==-1){
+                kfree(barrier);
                 return id;
-                }
-        ns->used_sems += nsems;
-        sma->sem_base = (struct sem *) &sma[1];
-        for (i = 0; i < nsems; i++)
-                INIT_LIST_HEAD(&sma->sem_base[i].sem_pending);
-        sma->complex_count = 0;
-        INIT_LIST_HEAD(&sma->sem_pending);
-        INIT_LIST_HEAD(&sma->list_id);
-        sma->sem_nsems = nsems;
-        sma->sem_ctime = get_seconds();
-        sem_unlock(sma);
-        return sma->sem_perm.id;
+        }
+
+        /*
+         * Initialize all the list of pointers to the wait queues of processes,
+         * one per SYNCHRONIZATION TAG
+         */
+
+        for(i=0;i<BARRIER_TAGS;i++){
+                INIT_LIST_HEAD(&(barrier->queues[i]));
+        }
+
+        /*
+         * Unlock the new instance of barrier
+         */
+
+        barrier_unlock(barrier);
+
+        return id;
 }
 
-/**
- *	ipc_findkey	-	find a key in an ipc identifier set
- *	@ids: Identifier set
- *	@key: The key to find
+/*
+ * Find the barrier_ipc_perm structure of the instance of barrier
+ * corresponding to the given key
  *
- *	Requires ipc_ids.rw_mutex locked.
- *	Returns the LOCKED pointer to the ipc structure if found or NULL
- *	if not.
- *	If key is found ipc points to the owning ipc structure
- *	NOTE: this function is defined as static in the source code, so
- *	we have to redifine it
+ * @ids: the "ipc_ids" that tracks the IDs of all the barriers
+ *       instantiated thanks to the field "ipcs_idr"
+ * @key: the key to be searched for
+ *
+ * This function has to be invoked holding the semaphore of the
+ * ids structure.
+ * Returns the barrier_ipc_perm structure corresponding to the given
+ * key (locked) or NULL in case it is not found
  */
 
-static struct kern_ipc_perm *ipc_findkey(struct ipc_ids *ids, key_t key)
+struct barrier_ipc_perm *find_barrier_key(struct ipc_ids *ids, key_t key)
 {
-        struct kern_ipc_perm *ipc;
+        struct barrier_ipc_perm *ipc;
         int next_id;
         int total;
 
@@ -232,7 +302,7 @@ static struct kern_ipc_perm *ipc_findkey(struct ipc_ids *ids, key_t key)
                 }
 
                 /*
-                 * Acquire a lock over the newly allocated structure
+                 * Acquire a lock over the found barrier_ipc_perm structure
                  */
 
                 spin_lock(&ipc->lock);
@@ -248,215 +318,334 @@ static struct kern_ipc_perm *ipc_findkey(struct ipc_ids *ids, key_t key)
 }
 
 /*
- * Function called by the service kernel routine in order to create a
- * new kern_perm_struct, in case no structure corresponding to the given
- * key is found; otherwise return the id of the structure corresponding
- * to the given key. The IPC subsystem allows to create instances of the
- * other IPC structures with a "IPC_PRIVATE" key: this ensures that a new
- * instance will be created, with a new key (and identifier, of course)
- * but we are not required to implement this feature
+ * Create a barrier when the given key is not BARRIER_PRIVATE: other processes
+ * will be available to use the same synchronization object
+ *
+ * @ids: the ipc_ids structure used to keep track of all the instances of
+ *       barrier and assign IDs to them
+ * @params: key and flags to be used to create the new instance of barrier
+ *
+ * Returns the ID assigned to the newly created barrier or -1 in case of error
  */
 
-int barrier_get(struct ipc_ids* ids, struct ipc_ops* ops, struct ipc_params* params){
+int barrier_get_public(struct ipc_ids* ids, struct barrier_params* params){
+
+        int err=-EAGAIN;
 
         /*
-         * Instantiate new "kern_ipc_perm" structure: this is used to handle permissions
-         * and sequence number of the barrier
+         * The barrier_ipc_perm of the barrier instance corresponding to the
+         * given key
          */
 
-        struct kern_ipc_perm* ipcp;
+        struct barrier_ipc_perm* barrier_perm;
 
         /*
-         * Get flags passed
+         * Flag specified as parameter to the system call
          */
 
-        int flags=params->flg;
+        int flg=params->flg;
 
         /*
-         * The code used as result of the system call invokation
+         * Try to create a new barrier until successful
          */
 
-        int err=EAGAIN;
-
-        while(err==EAGAIN){
+        while(err==-EAGAIN) {
 
                 /*
-                 * Call to idr subsystem before the new ID is returned;
-                 * (compliant to idr API) it prepares memory to store
-                 * it
+                 * We have to check if there's enough space for another entry in the idr object in
+                 * case an instance corresponding to the given key is not found but the flag
+                 * BARRIER_CREATE has been specified as parameter to the system call
+                 * (see same function call in "barrier_get_private")
                  */
 
-                err=idr_pre_get(&ids->ipcs_idr,GFP_KERNEL);
-
-                if(!err)
-
-                        /*
-                         * Return out of memory
-                         */
-
-                        return ENOMEM;
+                err = idr_pre_get(&ids->ipcs_idr, GFP_KERNEL);
 
                 /*
-                 * Acquire exclusive lock on ids before modifying it
-                 * (another process may be trying to get a barrier
-                 * at the same time)
+                 * (see same function call in "barrier_get_private")
                  */
 
                 down_write(&ids->rw_mutex);
 
                 /*
-                 * Look for the kern ipc perm struct associated to
-                 * the barrier identified by given key
+                 * Find the barrier_ipc_perm corresponding to the given key
                  */
 
-                ipcp = ipc_findkey(ids, params->key);
+                barrier_perm=find_barrier_key(ids,params->key);
 
                 /*
-                 * If no kern_ipc_perm struct with the given key is
-                 * found, then behave depending on the provided API,
-                 * otherwise
+                 * In case the barrier_ipc_perm is not found, check the given flags
                  */
 
-                if (ipcp == NULL) {
+                if(!barrier_perm){
 
                         /*
-                         * Fail because no kern_perm_create structure
-                         * with the given key was found and the flag
-                         * BARRIER_CREATE is not set (so the requestor
-                         * did not mean to create one, but rather one
-                         * corresponding to the given key)
+                         * If the BARRIER_CREATE flag was not specified, it means
+                         * no barrier has to be created in case the key is not found,
+                         * so exit with error -ENOENT
                          */
 
-                        if (!(flags & BARRIER_CREATE))
-                                err = -ENOENT;
+                        if(!(flg & BARRIER_CREATE))
+                                err -ENOENT;
 
+                                /*
+                                 * If the BARRIER_CREATE flag was specified (hence a new barrier
+                                 * with the given key has to be created) but there's no space for
+                                 * a new entry in the IDR object, exit with error -ENOMEM
+                                 */
+
+                        else if(!err)
+                                err=-ENOMEM;
+                        else
+                                /*
+                                 * The BARRIER_CREATE was specified, so a new barrier has
+                                 * to be created and also there's space for it
+                                 */
+                                err=newbarrier(params);
+                }
+
+                /*
+                 * A barrier with the given key does exists
+                 */
+
+                else{
                         /*
-                         * If idr_pre_get returns zero,
-                         * it means something went wrong
-                         * so fail
+                         * In case the process that issued the system call wants to create
+                         * a barrier with the given key exclusively (BARRIER_CREATE and BARRIER_EXCL
+                         * flags specified), exit with error -EEXIST;
                          */
 
-                        else if (!err)
-                                err = -ENOMEM;
-
+                        if(flg&BARRIER_CREATE && flg&BARRIER_EXCL)
+                                err=-EEXIST;
                         /*
-                         * If idr_pre_get returns a positive
-                         * number (no error occurred) and the
-                         * BARRIER_CREATE is given, create a
-                         * new barrier
+                         * If none or only the flag is specified, return the ID of the barrier
+                         * corresponding to the given key
                          */
 
                         else
-                                //err = ops->getnew(ns, params);
-                                err=newbarrier(params);
-                } else {
+                                err=barrier_perm->id;
 
                         /*
-                         * Found the barrier corresponding to the
-                         * given key; the object has been locked.
-                         * If both the flag BARRIER_CREATE and the flag
-                         * BARRIER_EXCL were specified, fail, otherwise
-                         * return the unique id of the structure
+                         * Always unlock the barrier_ipc_perm structure found before returning
                          */
 
-                        if (flags & BARRIER_CREATE && flags & BARRIER_EXCL)
-                                err = -EEXIST;
-                        else {
-                                err = &ipcp->id;
-
-                                /*
-                                 * Perform no more checks, unlike other ipc
-                                 * structures
-                                 * if (ops->more_checks)
-                                        err = ops->more_checks(ipcp, params);
-                                        */
-                                /*
-                                 * Perform no security check
-                                if (!err)
-
-                                        err = ipc_check_perms(ipcp, ops, params);
-                                        */
-
-                        }
-
-                        /*
-                         * Release locks on kern_perm_struct
-                         */
-
-                        spin_unlock(&ipcp->lock);
+                        spin_unlock(&(barrier_perm->lock));
                 }
 
-
                 /*
-                 * Release lock
+                 * Release write semaphore: if the associated wait queue is not
+                 * empty, a new process becomes runnable and is allowed to access
+                 * the ids structure
                  */
 
                 up_write(&ids->rw_mutex);
         }
 
-        return err;
+        /*
+         * Return the code corresponding to the outcome of the
+         * function
+         */
+
+        return  err;
 }
 
 /*
- * The definition of my custom system calls (kernel service routine).
- * Parameters are:
- * key_t key: this value is given in order to ask for a certain barrier
- * flags: flags that determine how the barrier should be created or returned,
- * if it exists
+ * Create a barrier when the given key is BARRIER_PRIVATE: the barrier won't be
+ * find by key, but only with its unique identifier
+ *
+ * @ids: the ipc_ids structure used to keep track of all the instances of
+ *       barrier and assign IDs to them
+ * @params: key and flags to be used to create the new instance of barrier
+ *
+ * Returns the ID assigned to the newly created barrier or -1 in case of error
+ */
+
+int barrier_get_private(struct ipc_ids* ids, struct barrier_params* params){
+
+        int err=-EAGAIN;
+
+        /*
+         * Try to create a new barrier until successful
+         */
+
+        while(err==-EAGAIN) {
+
+                /*
+                 * This is part of the "idr" facility, used to manage IDs of the barrier:
+                 * here we allocate memory for the worst possible case of IDs allocation.
+                 * It returns 0 in case the system is out of memory, 1 otherwise.
+                 * This first phase in the ID allocation using the idr mapping does not require
+                 * to acquire any lock: we are just reserving memory which is globally accessible.
+                 * The flag GFP_KERNEL tells the kernel where to find the new memory to be allocated
+                 * for the new entries in the idr mappings
+                 */
+
+                err = idr_pre_get(&ids->ipcs_idr, GFP_KERNEL);
+
+                /*
+                 * If allocation fails because of memory shortage,return -ENOMEM (the minus sign
+                 * is needed in order to adhere the linux kernel convention of returning negative
+                 * values in case of error)
+                 */
+
+                if (!err)
+                        return -ENOMEM;
+
+                /*
+                 * Try to get exclusive write access on the ids structure in
+                 * order to add a new id => the lock is necessary because
+                 * another process may try to get another instance of a
+                 * barrier concurrently, so we have to provide synchronized
+                 * access to the only ipc_ids structure associated to our
+                 * barrier.
+                 * With semaphores, if a new process comes to access the ids
+                 * and finds it locked, it is put in a wait queue until the
+                 * resource is available, so it doesn't waste CPU cycles.
+                 */
+
+                down_write(&ids->rw_mutex);
+
+                /*
+                 * Create new instance of barrier: "err" is initialized to the
+                 * IPC identifier of the new instance or to an error code if
+                 * something goes wrong
+                 */
+
+                err = newbarrier(params);
+
+                /*
+                 * Release write semaphore: if the associated wait queue is not
+                 * empty, a new process becomes runnable and is allowed to access
+                 * the ids structure
+                 */
+
+                up_write(&ids->rw_mutex);
+        }
+
+        /*
+         * Return the code corresponding to the outcome of the
+         * function newbarrier
+         */
+
+        return  err;
+}
+
+/*
+ * Function called by the service kernel routine in order to get the instance
+ * of a barrier corresponding to the given key.
+ * The interpretation of specified parameters resembles the one of the IPC subsystem.
+ * In particular, if no barrier corresponding to the requested key is found and the
+ * flag BARRIER_CREATE is specified, a new instance is created; if no barrier corresponding
+ * to the given key is found and the BARRIER_CREATE flag was not specified, the function
+ * returns the error message ENOENT (not existing).
+ * A process can guarantee that it is the only one creating a barrier with the given
+ * key with the BARRIER_EXCL flag: in fact, if the the flag is given but another barrier
+ * with the same key is found, the function fails with error EEXIST
+ * Finally, the key BARRIER_PRIVATE may be specified: in this case the barrier won't be visible
+ * to other processes unless the process that created it gives them the unique ID of the
+ * barrier
+ *
+ * @ids: the ipc_ids structure used to keep track of all the instances of
+ *       barrier and assign IDs to them
+ * @params: key and flags to be used to create the new instance of barrier
+ */
+
+int barrier_get(struct ipc_ids* ids, struct barrier_params* params){
+
+        int flags,err;
+        struct barrier_ipc_perm* barrierperm;
+
+        if(params->key==BARRIER_PRIVATE)
+
+                /*
+                 * If the key was specified as BARRIER_PRIVATE, create a new the barrier assigning it
+                 * the next available ID
+                 */
+
+                return  barrier_get_private(ids,params);
+        else
+                /*
+                 * Find the particular instance of barrier corresponding to the given key
+                 */
+
+                return barrier_get_public(ids,params);
+}
+
+/*
+ * SYSTEM CALL KERNEL SERVICE ROUTINES - start
+ *
+ * 1 - sys_get_barrier
+ * 2 - sys_release_barrier
+ * 3 - sys_sleep_on_barrier
+ * 4 - sys_awake_barrier
+ */
+
+/*
+ * Instantiate a new barrier synchronization object
+ *
+ * @ key: this value is given in order to ask for a certain barrier
+ * @flags: flags that determine how the barrier should be created or returned,
+ * if it exists (see "barrier_get" function)
+ *
  * Returns:
  * the IPC id arbitrary assigned to the barrier, if created, or the of
  * the barrier identified by the key, if already existing
  */
 
 asmlinkage long sys_get_barrier(key_t key,int flags){
-        printk(KERN_INFO "System call invoked");
 
         /*
-         * The representation of the IPC object within the IPC subsystem
+         * Return value of this system call
          */
 
-        struct ipc_ops barrier_ops;
-        struct ipc_params barrier_params;
+        int ret;
 
         /*
-         * Set operations available for this new synchronization object
+         * Create new structures to hold parameters
          */
 
-        barrier_ops.getnew = newbarrier;
-        barrier_ops.associate = NULL;
-        barrier_ops.more_checks = NULL;
+        struct barrier_params barrier_params;
+
+        printk(KERN_INFO "System call sys_get_barrier invoked with params: key=%d flags=%d\n",key,flags);
 
         /*
-         * Set the structure representing parameters to be used to create
-         * the new synchronization object
+         * Set corresponding parameters to value received from wrapper
+         * function
          */
 
         barrier_params.key = key;
         barrier_params.flg = flags;
 
         /*
-         * The ipcget function is in charge of create a new barrier according
-         * to the flags provided or find the one corresponding to the provided
-         * key
+         * Create a new barrier according to the flags provided or find
+         * the one corresponding to the provided key
+         * The return value from the below function coincides with the
+         * return value of this system call
          */
 
-        return barrier_get(&barrier_ids, &barrier_ops, &barrier_params);
+        ret=barrier_get(&barrier_ids, &barrier_params);
+
+        printk(KERN_INFO "System call sys_get_barrier returned this value:%d\n",ret);
 
 
 }
 
 /*
+ * SYSTEM CALL KERNEL SERVICE ROUTINES - end
+ */
+
+/*
  * BARRIER INITIALIZATION:
  * First step in the initialization of the the barrier data structure:
- * initialize the "ipc_ids" identifiers set data structure: this is
+ *
+ * @barrier_ids :the "ipc_ids" identifiers set data structure. It is
  * in charge of handling the ids assigned to every instance of this
- * data structure. It makes use of the "idr API".
+ * data structure.
+ *
  * There's one per data structure and the namespace of each process
  * keeps a reference to them => since IPC does not include our barrier,
  * we store it somewhere else and then export the location in order
  * for all the processes to find it when they have to deal with barriers.
  * (this function resembles "ipc_init_ids" function)
- * SEQ_MULTIPLIER is the maximum number of barriers allowed:32768
  * The id of a resource is calculated (as in IPC subsystem) as follows:
  *
  * id=s*SEQ_MULTIPLIER+i
@@ -465,80 +654,185 @@ asmlinkage long sys_get_barrier(key_t key,int flags){
  * in this case) and i is the "slot index" for the specific instance among all
  * the instantiated barriers, arbitrary assigned.
  * "s" is initializes to 0 and incremented at every resource allocation
+ * SEQ_MULTIPLIER is the maximum number of barriers allowed:32768
  */
 
 void barrier_init(struct ipc_ids* barrier_ids){
-        ipc_init_ids(barrier_ids);
+
+        /*
+         * Initialize the read/write semaphore that protects
+         * the ipc_ids structure for our barriers: the "count"
+         * field of the semaphore is set to 0, the "wait_lock"
+         * is set to "unlocked" and the list of waiting processes
+         * ("wait_list") is set to an empty list.
+         * We need to synchronize access to this structure because
+         * it will be accessed concurrently by all the processes that
+         * want to create a new barrier object
+         */
+
+        init_rwsem(&barrier_ids->rw_mutex);
+
+        /*
+         * Initially no IDs are allocated
+         */
+
+        barrier_ids->in_use = 0;
+
+        /*
+         * Same holds for sequence numbers
+         */
+
+        barrier_ids->seq=0;
+
+        /*
+         * Set the maximum for the sequence number of a barrier
+         */
+
+        barrier_ids->seq_max = INT_MAX/BARRIER_IDS_MAX;
+
+        /*
+         * Finally initialize the idr handle that will be used
+         * to assign unique IDs to all the instances of barrier:
+         * The type of this structure is "struct idr" and the
+         * function "idr_init" simply allocates memory dynamically
+         * to store it and also initializes its lock
+         */
+
+        idr_init(&barrier_ids->ipcs_idr);
 }
 
 /*
+ * INSERT/REMOVE MODULE - start
+ */
+
+/*
+ * INSERT MODULE
  * "Dynamically" add system calls to the system:
- * -> after having added four new entries in the
- * system call table and having set the corresponding
- * function to "sys_ni_call" (which is designed for
- * not implemented system calls), now we replace them
- * with our custom kernel service routines
+ * -> replace not implemented system calls (sys_ni_syscall) with custom system calls
  */
 
 int init_module(void) {
 
         /*
-         * First we have to find the address of the system call table
+         * Value stored in the register CR0
          */
 
-        unsigned long** system_call_table=find_system_call_table();
+        unsigned long cr0;
 
         /*
-         * At this point we have to set the last four entries of the
-         * system call table with our custom kernel service routines.
-         * We first acquire a lock on the page containing the table
-         * in order to avoid race conditions
+         * Find the address of the system call table
          */
 
-        spinlock_t table_lock;
-        spin_lock_init(&table_lock);
+        system_call_table=find_system_call_table();
 
         /*
-         * Lock acquired: now we have to temporarily change the attribute
-         * of the page containing the system table in order to be allowed
-         * to modify it
+         * Get the indexes of the free entries in the system call table,
+         * i.e. those initialized to the address of "sys_ni_syscall".
+         * This is necessary in order to restore the system call table
+         * when the module is removed
          */
 
-        make_page_writable(system_call_table);
+        find_free_syscalls(system_call_table,restore);
 
         /*
-         * Set the first custom kernel service routine
+         * In case the CPU has WRITE-PROTECTED MODE enabled, even kernel
+         * thread can't modify read-only pages, such those containing the
+         * system call table => we first have to disable the WRITE-PROTECTED MODE
+         * by clearing the corresponding bit (number 16) in the CR0 register.
          */
 
-        system_call_table[338]=sys_get_barrier;
+        disable_write_protected_mode(&cr0);
 
         /*
-         * Restore original setting of the page containing the system table
+         * Replace system call "sys_ni_syscall" in the system call table
+         * with our custom system calls: we assume that no other process
+         * running on any other CPU ever tries to access the system call
+         * not implemented => if this assumption holds, the following code
+         * is thread-safe
          */
 
-        make_page_readable(system_call_table);
+        //system_call_table[restore[0]]=(unsigned long)sys_get_barrier;
+        //system_call_table[restore[1]]=not_implemented_syscall;
+        //system_call_table[restore[2]]=not_implemented_syscall;
+        //system_call_table[restore[3]]=not_implemented_syscall;
 
         /*
-         * Now we are done with system call table, so release the lock
+         * Restore original value of register CR0
          */
 
-        spin_unlock(&table_lock);
-
-        printk(KERN_INFO "Hello address:%lx\n",system_call_table);
+        enable_write_protected_mode(&cr0);
 
         /*
-         * Initialize data structures necessary to handle a barrier
+         * Allocate a new structure "ipc_ids" in order to keep track of
+         * all the existing barrier objects as they are created
          */
 
-        barrier_init(&barrier_ids);
+        barrier_ids=kmalloc(sizeof(struct ipc_ids), GFP_KERNEL);
 
+        /*
+         * Initialize the newly created "ipc_ids" structure
+         */
+
+        barrier_init(barrier_ids);
+
+        printk(KERN_INFO "Address of the ipc_ids:%lu\n",barrier_ids);
+
+        /*
+         * Log message about our just inserted module
+         */
+
+        printk(KERN_INFO "Module \"barrier_module\" inserted: index of replaced system calls:%d,%d,%d,%d\n",restore[0],restore[1],restore[2],restore[3]);
         return 0;
 
 }
 
+/*
+ * REMOVE MODULE
+ * Restore the system call table to its original form removing our custom system  calls
+ */
+
 void cleanup_module(void) {
-        printk(KERN_INFO "Goodbye world 1.\n");
+
+        unsigned long cr0;
+
+        /*
+         * In order to restore the system call table, the WRITE-PROTECTED
+         * MODE has to be disabled again temporarily, so first save the
+         * value of the CR0 register
+         */
+
+        disable_write_protected_mode(&cr0);
+
+        /*
+         * Restore system call table to its original shape
+         */
+
+        //system_call_table[restore[0]]=not_implemented_syscall;
+        //system_call_table[restore[1]]=(unsigned long)sys_ni_syscall;
+        //system_call_table[restore[2]]=(unsigned long)sys_ni_syscall;
+        //system_call_table[restore[3]]=(unsigned long)sys_ni_syscall;
+
+        /*
+         * Restore value of register CR0
+         */
+
+        enable_write_protected_mode(&cr0);
+
+        /*
+         * Free memory allocated for the ipc_ids structure
+         */
+
+        kfree(barrier_ids);
+
+        printk(KERN_INFO "Released memory allocated for the structure ipc_ids at address %lu\n",barrier_ids);
+
+        printk(KERN_INFO "Module \"barrier_module\" removed\n");
 
 }
 
+/*
+ * INSERT/REMOVE MODULE - end
+ */
+
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Davide Leoni");
