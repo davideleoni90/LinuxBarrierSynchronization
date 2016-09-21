@@ -22,16 +22,23 @@
 #define BARRIER_TAGS 32
 
 /*
- * Maximum number of IDs for the barrier synchronization object: the same
- * limit as for semaphores
+ * Maximum number of processes synchronized on a tag: we want to avoid that
+ * list of wait queue heads grow indefinitely
  */
 
-#define BARRIER_IDS_MAX (IPCMNI)
+#define BARRIER_PER_TAG_MAX 128
+
+/*
+ * Maximum number of IDs for the barrier synchronization object: there can be at most
+ * BARRIER_IDS_MAX different instances at a time
+ */
+
+#define BARRIER_IDS_MAX 128
 
 /*
  * Kernel service routine to get the an instance of a barrier.
  * Paremeters:
- * 1- key_t key: used to univokely identify the instance of the barrier
+ * 1- key_t key: used to uniquely identify the instance of the barrier
  * 2- int flags: flags to define the action to perform on the barrier
  */
 
@@ -72,38 +79,75 @@ struct barrier_params
         int flg;
 };
 
+struct ipc_params{
+        key_t key;
+        int flg;
+        union{
+                size_t  size;
+                int nsems;
+        }u;
+};
+
 /*
- * Structure representing a new barrier: the most important field is the array
- * with 32 elements, one per SYNCHRONIZATION TAG, where each element
- * is a list of pointers to wait queues for that specific TAG, one per process
- * which requested to sleep on the barrier with that priority tag. The wait queue
- * is stored in the kernel mode stack of the process, because we don't want to
- * allocate more memory than what is already allocated by the stack. Of course
- * we have to keep the level of stack occupancy low, but since we have one wait
- * queue for each synchronization tag, and each wait queue has only one element,
- * we occupy at most 32*size_of(wait_queue) for each barrier in the kernel mode
- * stack of a process
+ * Element associated to a process sleeping on a certain tag
+ *
+ * queue_list: list element, used to connect the structure to the list "queues" within the barrier_tag
+ * structure
+ *
+ * queue: pointer to the wait queue head of the wait queue stored in the Kernel Mode Stack of a sleeping
+ * process synchronized on this tag
+ */
+
+struct process_queue
+{
+        struct list_head queue_list;
+        wait_queue_head_t* queue;
+};
+
+/*
+ * Structure that keeps track of all the processes sleeping on a certain synchronization
+ * tag
+ *
+ * counter: number of processes sleeeping on this tag; this has to be smaller than the limit
+ * represented by the constant BARRIER_PER_TAG_MAX
+ *
+ * tag: the synchronization tag corresponding to this structure
+ *
+ * tag_list: list element, used to connect the structure to the list "tags" within the barrier
+ *
+ * queues: head of a list of structures, each containing a pointer to the wait queue into which
+ * a process is sleeping in order to synchronize itself on the this tag
+ *
+ * sleeping: boolean value that has to be changed from the "sleep_on_barrier" system call in order
+ * to wake up all the processes synchronized on the this tag
+ *
+ *
+ */
+
+struct barrier_tag
+{
+        int counter;
+        int tag;
+        struct list_head tag_list;
+        struct list_head queues;
+        bool sleeping;
+};
+
+/*
+ * Structure representing a barrier
+ *
+ * barrier_perm: permission object associated to the barrier: its main field
+ * is the ID that is assigned to (and only to) the instance of barrier by
+ * the ipc_ids structure
+ *
+ * tags: head of the list of "barrier_tag" structures, one for each different TAG
+ * requested using the system call "sleep_on_barrier(bd,TAG)"
  */
 
 struct barrier_struct{
 
-        /*
-         * barrier_ipc_perm structure corresponding to the barrier: its main field
-         * is the ID that is assigned to (and only to) the instance ob barrier by
-         * the ipc_ids structure
-         */
-
-        struct barrier_ipc_perm	barrier_perm;
-
-        /*
-         * This array contains the list of pointers to wait queues, with one list for
-         * each SYNCHRONIZATION TAG.Each list contains the address of a wait queue for
-         * each process that wants to sleep on the barrier with the SYNCHRONIZATION TAG
-         * corresponding to the list; the wait queue is stored in the kernel mode stack
-         * of the process itself
-         */
-
-        struct list_head queues [BARRIER_TAGS];
+        struct kern_ipc_perm barrier_perm;
+        struct list_head tags;
 };
 
 /*
@@ -117,9 +161,9 @@ struct barrier_struct{
  *      . routine to call for an extra check if needed
  */
 struct ipc_ops {
-        int (*getnew) (struct ipc_namespace *, struct barrier_params *);
+        int (*getnew) (struct ipc_namespace *, struct ipc_params *);
         int (*associate) (struct kern_ipc_perm *, int);
-        int (*more_checks) (struct kern_ipc_perm *, struct barrier_params *);
+        int (*more_checks) (struct kern_ipc_perm *, struct ipc_params *);
 };
 
 

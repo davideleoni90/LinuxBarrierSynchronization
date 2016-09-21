@@ -16,12 +16,10 @@
 #include <linux/sem.h>
 #include <linux/slab.h>
 #include <linux/gfp.h>
+#include <linux/err.h>
 #include <linux/ipc_namespace.h>
 #include <asm-generic/current.h>
 #include <asm-generic/pgtable.h>
-
-void enable_write_protected_mode(unsigned long* cr0);
-void disable_write_protected_mode(unsigned long* cr0);
 
 /*
  * Pointer to the ipc_ids data structure used to keep track of  all the instances
@@ -45,7 +43,7 @@ void barrier_lock(struct barrier_struct* barrier){
 
 /*
  * Unlock the "barrier_ipc_perm" structure within an instance of
- * barrier
+ * barrier and unlock the barrier itself
  *
  * @barrier: pointer to the barrier whose barrier_ipc_perm has to
  * be blocked
@@ -54,6 +52,7 @@ void barrier_lock(struct barrier_struct* barrier){
 void barrier_unlock(struct barrier_struct* barrier){
         struct barrier_ipc_perm* barrier_ipc_perm=&(barrier->barrier_perm);
         spin_unlock(&(barrier_ipc_perm->lock));
+        read_unlock(&barrier->lock);
 }
 
 /*
@@ -62,11 +61,13 @@ void barrier_unlock(struct barrier_struct* barrier){
  * in the structure that manages the IDs for the barrier (idr mapping)
  * and return it. The newly created entry is returned in a locked
  * state; also this function is invoked holding the lock on the
- * ipc_ids structure.
+ * ipc_ids structure as writer.
  *
  * @ids: pointer to the "ipc_ids" structure that manages ids of barriers
  * @new: pointer to the newly created barrier that has to be assigned a
  *       new ID
+ * @barrier: pointer to the barrier structure for which we are getting
+ *       the new ID
  *
  * Returns a unique identifier for the new instance of barrier
  * This is calculated (as in IPC subsystem) as follows:
@@ -78,7 +79,7 @@ void barrier_unlock(struct barrier_struct* barrier){
  * SEQ_MULTIPLIER is the maximum number of barriers allowed:32768
  */
 
-int barrier_addid(struct ipc_ids *ids, struct barrier_ipc_perm *new){
+int barrier_addid(struct ipc_ids *ids, struct barrier_ipc_perm *new,struct barrier_struct* barrier){
 
         /*
          * Final ID and error code to be returned (either the former or
@@ -103,8 +104,16 @@ int barrier_addid(struct ipc_ids *ids, struct barrier_ipc_perm *new){
         spin_lock_init(&new->lock);
 
         /*
+         * Acquire a read lock on the barrier structure in order to prevent
+         * a race condition with a potential process that modifies it concurrently
+         */
+
+        read_lock(&barrier->lock);
+
+        /*
          * Acquire the lock on the barrier_ipc_perm structure before assigning it
-         * a new ID: access to IDR API has to be serialized
+         * a new ID: access to IDR API has to be serialized because another process
+         * may try to get a new ID for a new barrier concurrently
          */
 
         spin_lock(&new->lock);
@@ -120,11 +129,13 @@ int barrier_addid(struct ipc_ids *ids, struct barrier_ipc_perm *new){
         err = idr_get_new(&ids->ipcs_idr, new, &id);
 
         /*
-         * In case of error, unlock the barrier and return the error code
+         * In case of error, unlock the barrier and the barrier_ipc_kern and return
+         * the error code
          */
 
         if(err){
                 spin_unlock(&new->lock);
+                read_unlock(&barrier->lock);
                 return err;
         }
 
@@ -149,6 +160,10 @@ int barrier_addid(struct ipc_ids *ids, struct barrier_ipc_perm *new){
 
         new->id=ids->seq*BARRIER_IDS_MAX+id;
 
+        /*
+         * Return the id assigned by the IDR api
+         */
+
         return  id;
 
 }
@@ -163,7 +178,7 @@ int barrier_addid(struct ipc_ids *ids, struct barrier_ipc_perm *new){
  *
  * This function is called while holding the r/w semaphore of
  * the global (shared among all barriers) ipc_ids structure
- * as a writer
+ * as writer
  *
  */
 
@@ -226,13 +241,19 @@ int newbarrier(struct barrier_params * params){
         barrier->barrier_perm.key = key;
 
         /*
+         * Initialize the r/w lock
+         */
+
+        barrier->lock=RW_LOCK_UNLOCKED;
+
+        /*
          * Get a new id for the new instance of barrier from the
          * structure "barrier_ids"
          * In case a free ID is found, the barrier is locked and
          * the ID is returned.
          */
 
-        id = barrier_addid(&barrier_ids, &barrier->barrier_perm);
+        id = barrier_addid(&barrier_ids, &barrier->barrier_perm,&barrier);
 
         /*
          * If the ID is set to -1, it means something went wrong with
@@ -242,6 +263,7 @@ int newbarrier(struct barrier_params * params){
          */
 
         if(id==-1){
+
                 kfree(barrier);
                 return id;
         }
@@ -261,7 +283,11 @@ int newbarrier(struct barrier_params * params){
 
         barrier_unlock(barrier);
 
-        return id;
+        /*
+         * Return the assigned IPC identifier
+         */
+
+        return barrier->barrier_perm.id;
 }
 
 /*
@@ -315,6 +341,143 @@ struct barrier_ipc_perm *find_barrier_key(struct ipc_ids *ids, key_t key)
          */
 
         return NULL;
+}
+
+/*
+ * Given an ipc_ids structure and id, check if there's an entry in the "idr" field
+ * of the ipc_ids that coincides with the given id
+ *
+ * @ids: pointer to the ipc_ids structure that coordinates all the instances of barrier
+ * @id: id of the instance to be removed
+ *
+ * Returns the barrier_ipc_perm instance registered at ids with the given id, whether it
+ * exists
+ */
+
+struct barrier_ipc_perm* barrier_check_id(struct ipc_ids* ids, int id){
+
+        /*
+         * Pointer to the barrier_ipc_perm corresponding to the given id (whether existing)
+         */
+
+        struct barrier_ipc_perm* to_be_removed;
+
+        /*
+         * Id stored in the idr object for the barrier having the given id, i.e. IPC identifier
+         * (recall that IPC_identifier=s*SEQ_MULTIPLIER+id, where s is the sequence number of
+         * the barrier and id is the identifier at the barrier stored in the idr object)
+         */
+
+        int idr_id;
+
+        /*
+         * Get the identifier at idr
+         */
+
+        idr_id=id%BARRIER_IDS_MAX;
+
+        /*
+         * Find the barrier_ipc_perm structure  corresponding to the given id
+         */
+
+        to_be_removed=idr_find(&ids->ipcs_idr,idr_id);
+
+        /*
+         * If no barrier with the given id exists, return error -EINVAL (wrong
+         * value)
+         */
+
+        if(!to_be_removed)
+                return (void*)(-EINVAL);
+
+        /*
+         * Otherwise, if a barrier_ipc_perm with the given id exists, lock it
+         */
+
+        spin_lock(&to_be_removed->lock);
+
+        /*
+         * Double check the given id: the field "id" of the barrier_ipc_perm
+         * structure has to be such that the remainder when dividing it by the
+         * SEQ_MULTIPLIER condidice with the field "seq" of the barrier_ipc_perm
+         *
+         * In case we find out that the barrier_ipc_perm doesn't correspond to the
+         * given id, we unlock the barrier_ipc_perm and return the error -EIDRM
+         * (identifier removed)
+         */
+
+        if(id/BARRIER_IDS_MAX!=to_be_removed->seq){
+                spin_unlock(&to_be_removed->lock);
+                return (void*)(-EIDRM);
+        }
+
+        /*
+         * If the check was successful, return the address of the barrier_ipc_perm
+         * that has to be removed
+         */
+
+        return to_be_removed;
+
+}
+
+/*
+ * Function to be executed before the barrier is actually released, without holding
+ * any lock.
+ *
+ * @ids: pointer to the ipc_ids structure that coordinates all the instances of barrier
+ * @id: id of the instance to be removed
+ *
+ * It performs some checks on the ID, i.e. whether it is well formed and a barrier with
+ * such an ID exists, and the latter case a pointer to the corresponding barrier_ipc_perm
+ * structure is returned (with the structure locked), otherwise a pointer to an error code
+ * is returned.
+ */
+
+struct barrier_ipc_perm* barrier_pre_release(struct ipc_ids* ids, int id){
+
+        /*
+         * Pointer to the barrier_ipc_perm corresponding to the given id (whether existing)
+         */
+
+        struct barrier_ipc_perm* to_be_removed;
+
+        /*
+         * Error code
+         */
+
+        int err;
+
+        /*
+         * Acquire lock as writer on the ipc_ids structure because we are going to
+         * remove one entry from its idr field
+         */
+
+        down_write(&ids->rw_mutex);
+
+        /*
+         * Check the id provided: if it's valid, the corresponding barrier_ipc_perm
+         * is returned
+         */
+
+        to_be_removed=barrier_check_id(ids,id);
+
+        /*
+         * Check if an error that was returned: if so, return it after having released
+         * the mutex over ipc_ids structure
+         */
+
+        if(IS_ERR(to_be_removed)) {
+                up_write(&ids->rw_mutex);
+                return (void *) to_be_removed;
+        }
+
+        /*
+         * Return the barrier_ipc_perm to be removed in a locked state
+         */
+
+        return to_be_removed;
+
+
 }
 
 /*
@@ -493,10 +656,9 @@ int barrier_get_private(struct ipc_ids* ids, struct barrier_params* params){
                 /*
                  * Try to get exclusive write access on the ids structure in
                  * order to add a new id => the lock is necessary because
-                 * another process may try to get another instance of a
-                 * barrier concurrently, so we have to provide synchronized
-                 * access to the only ipc_ids structure associated to our
-                 * barrier.
+                 * we are going to modify the ipc_ids structure, which is
+                 * shared among all the processes that instantiated a barrier
+                 *
                  * With semaphores, if a new process comes to access the ids
                  * and finds it locked, it is put in a wait queue until the
                  * resource is available, so it doesn't waste CPU cycles.
@@ -587,8 +749,8 @@ int barrier_get(struct ipc_ids* ids, struct barrier_params* params){
  * if it exists (see "barrier_get" function)
  *
  * Returns:
- * the IPC id arbitrary assigned to the barrier, if created, or the of
- * the barrier identified by the key, if already existing
+ * the IPC id arbitrary assigned to the barrier, if created, or the id of the
+ * barrier identified by the key, if already existing
  */
 
 asmlinkage long sys_get_barrier(key_t key,int flags){
@@ -627,6 +789,49 @@ asmlinkage long sys_get_barrier(key_t key,int flags){
         printk(KERN_INFO "System call sys_get_barrier returned this value:%d\n",ret);
 
 
+}
+
+/*
+ * Release a barrier synchronization instance given its ID
+ *
+ * @bd: ID of the synchronization object to be removed
+ *
+ * Returns a code indicating whether the operation was successful or not
+ */
+
+asmlinkage long sys_release_barrier(int bd){
+
+        /*
+         * The barrier_ipc_perm of the barrier to be removed
+         */
+
+        struct barrier_ipc_perm* barrier_perm;
+
+        /*
+         * Do some preliminary operation:
+         *
+         * 1 - check validity of the given id
+         * 2 - lock the instance corresponding to the given id if
+         *     found
+         */
+
+        barrier_perm=barrier_pre_release();
+
+        /*
+         * Check if the pointer points to a barrier_ipc_perm structure
+         * or to an error code; in the latter case, return the error
+         * as long, since this is the return value of the system call
+         */
+
+        if(IS_ERR_VALUE(barrier_perm))
+                return (long)barrier_perm;
+
+        /*
+         * At this point we found the barrier_ipc_perm structure to be removed:
+         * at this point we have to free the barrier struct that contains it and
+         * also remove the wait queues from all the processes that were sleeping
+         * on the barrier
+         */
 }
 
 /*
@@ -752,9 +957,9 @@ int init_module(void) {
          */
 
         //system_call_table[restore[0]]=(unsigned long)sys_get_barrier;
-        //system_call_table[restore[1]]=not_implemented_syscall;
-        //system_call_table[restore[2]]=not_implemented_syscall;
-        //system_call_table[restore[3]]=not_implemented_syscall;
+        //system_call_table[restore[1]]=(unsigned long)sys_sleep_on_barrier;
+        //system_call_table[restore[2]]=(unsigned long)sys_awake_barrier;
+        //system_call_table[restore[3]]=(unsigned long)sys_release_barrier;
 
         /*
          * Restore original value of register CR0
@@ -808,9 +1013,9 @@ void cleanup_module(void) {
          */
 
         //system_call_table[restore[0]]=not_implemented_syscall;
-        //system_call_table[restore[1]]=(unsigned long)sys_ni_syscall;
-        //system_call_table[restore[2]]=(unsigned long)sys_ni_syscall;
-        //system_call_table[restore[3]]=(unsigned long)sys_ni_syscall;
+        //system_call_table[restore[1]]=not_implemented_syscall;
+        //system_call_table[restore[2]]=not_implemented_syscall;
+        //system_call_table[restore[3]]=not_implemented_syscall;
 
         /*
          * Restore value of register CR0
