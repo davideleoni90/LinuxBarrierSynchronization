@@ -77,6 +77,8 @@ struct barrier_tag* newtag(int tag){
 
         new_tag=kmalloc(sizeof(struct barrier_tag),GFP_KERNEL);
 
+        printk(KERN_INFO "Address of the tag number %d:%lu\n",tag,new_tag);
+
         /*
          * Check if the barrier_tag object has been successfully allocated: if not,
          * return the error -ENOMEM (no memory space)
@@ -159,6 +161,8 @@ int newbarrier(struct ipc_namespace* ns, struct ipc_params* params){
          */
 
         barrier = ipc_rcu_alloc(sizeof(*barrier));
+
+        printk(KERN_INFO "Address of the barrier with key %d:%lu\n",key,barrier);
 
         /*
          * Return error in case there's not enough memory left
@@ -349,6 +353,8 @@ struct kern_ipc_perm* checkbarrier(int tag,int bd){
 
 void awake_tag(struct barrier_tag* barrier_tag){
 
+        printk(KERN_INFO "Awaking tag:%d\n",barrier_tag->tag);
+
         /*
          * Pointer to an element of the list associated to the barrier_tag
          */
@@ -378,11 +384,15 @@ void awake_tag(struct barrier_tag* barrier_tag){
         list_for_each_entry(tag_list_element,&barrier_tag->queues,queue_list)
                 wake_up(tag_list_element->queue);
 
+        printk(KERN_INFO "Woken up tag:%d\n",barrier_tag->tag);
+
         /*
          * Remove the structure associated to this tag from the corresponding list of the barrier
          */
 
         list_del(&barrier_tag->tag_list);
+
+        printk(KERN_INFO "Removed tag structure from list of tags:%d\n",barrier_tag->tag);
 
         /*
          * Once we exit the above loop, we can be sure that all the processes synchronized on the current
@@ -390,6 +400,8 @@ void awake_tag(struct barrier_tag* barrier_tag){
          */
 
         kfree(barrier_tag);
+
+        printk(KERN_INFO "Removed tag structure:%d\n",barrier_tag->tag);
 }
 
 /*
@@ -424,7 +436,9 @@ void freebarrier(struct kern_ipc_perm* perm){
          * Get the barrier corresponding to the given permission object
          */
 
-        container_of(perm,struct barrier_struct,barrier_perm);
+        to_be_removed=container_of(perm,struct barrier_struct,barrier_perm);
+
+        printk(KERN_INFO "Releasing barrier with id %d at address %lu\n",perm->id,to_be_removed);
 
         /*
          * Wake up processes sleeping on each tag and release objects associated to the
@@ -441,6 +455,19 @@ void freebarrier(struct kern_ipc_perm* perm){
          */
 
         ipc_rmid(barrier_ids,perm);
+
+        /*
+         * Check if removed: we expect we can't find the entry in the idr
+         */
+
+        void* prova=tag;
+
+        prova=idr_find(&barrier_ids->ipcs_idr,(perm->id) % IPCMNI);
+
+        if(!prova){
+                printk(KERN_INFO "Released barrier with id %d\n",perm->id);
+        }
+
 
         /*
          * Release the lock on the permission object
@@ -486,6 +513,7 @@ int idr_iterate_callback (int id, void *p, void *data){
          * Acquire the lock on the permission object pointed by p
          */
 
+        rcu_read_lock();
         spin_lock(&perm->lock);
 
         /*
@@ -535,13 +563,15 @@ void remove_ids(void){
 
         idr_for_each(&barrier_ids->ipcs_idr,idr_iterate_callback,NULL);
 
+        printk(KERN_INFO "All barriers removed\n");
+
         /*
          * Once the above function has finished its task, there are no more instances of barrier
          * around, so we can unlock the ipc_ids and then free it
          */
 
         up_write(&barrier_ids->rw_mutex);
-        kfree(&barrier_ids);
+        kfree(barrier_ids);
 }
 
 /*
@@ -650,6 +680,8 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
         barrier_tag=findtag(barrier,tag);
         if(!barrier_tag){
 
+                printk(KERN_INFO "Creating struct barrier_tag for tag:%d\n",tag);
+
                 /*
                  * Allocate a new barrier_tag to handle the synchronization tag
                  */
@@ -669,12 +701,16 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
 
                 }
 
+                printk(KERN_INFO "Adding tag %d to list\n",tag);
+
                 /*
                  * Add the newly created barrier_tag to the list of tags from the
                  * barrier
                  */
 
-                list_add(&barrier->tags,&barrier_tag->tag_list);
+                list_add(&barrier_tag->tag_list,&barrier->tags);
+
+                printk(KERN_INFO "Added tag %d to list\n",tag);
         }
 
         /*
@@ -709,6 +745,8 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
          */
 
         list_add(&process_queue.queue_list,&barrier_tag->queues);
+
+        printk(KERN_INFO "Adding process to list of tag %d: the address is %lu\n",tag,process_queue);
 
         /*
          * Increment the counter of the "barrier_tag" structure because this process is now sleeping
@@ -1082,10 +1120,10 @@ int init_module(void) {
          * is thread-safe
          */
 
-        //system_call_table[restore[0]]=(unsigned long)sys_get_barrier;
-        //system_call_table[restore[1]]=(unsigned long)sys_sleep_on_barrier;
-        //system_call_table[restore[2]]=(unsigned long)sys_awake_barrier;
-        //system_call_table[restore[3]]=(unsigned long)sys_release_barrier;
+        system_call_table[restore[0]]=(unsigned long)sys_get_barrier;
+        system_call_table[restore[1]]=(unsigned long)sys_sleep_on_barrier;
+        system_call_table[restore[2]]=(unsigned long)sys_awake_barrier;
+        system_call_table[restore[3]]=(unsigned long)sys_release_barrier;
 
         /*
          * Restore original value of register CR0
@@ -1148,10 +1186,10 @@ void cleanup_module(void) {
          * Restore system call table to its original shape
          */
 
-        //system_call_table[restore[0]]=not_implemented_syscall;
-        //system_call_table[restore[1]]=not_implemented_syscall;
-        //system_call_table[restore[2]]=not_implemented_syscall;
-        //system_call_table[restore[3]]=not_implemented_syscall;
+        system_call_table[restore[0]]=not_implemented_syscall;
+        system_call_table[restore[1]]=not_implemented_syscall;
+        system_call_table[restore[2]]=not_implemented_syscall;
+        system_call_table[restore[3]]=not_implemented_syscall;
 
         /*
          * Restore value of register CR0

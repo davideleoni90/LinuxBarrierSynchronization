@@ -22,6 +22,8 @@
 #include <linux/ipc.h>
 #include <asm-generic/current.h>
 
+#define WP_X86 0x00010000
+
 /*
  * FIND ADDRESS OF THE SYSTEM CALL TABLE AND SYS_NY_SYCALL- start
  */
@@ -165,7 +167,7 @@ void disable_write_protected_mode(unsigned long* cr0){
          */
 
         printk(KERN_INFO "CR0 %lu\n",*cr0);
-        //write_cr0(*cr0 &~WP_X86);
+        write_cr0(*cr0 &~WP_X86);
 }
 
 void enable_write_protected_mode(unsigned long* cr0){
@@ -174,7 +176,7 @@ void enable_write_protected_mode(unsigned long* cr0){
          * Restore the value of the control register CR0
          */
 
-        //write_cr0(*cr0);
+        write_cr0(*cr0);
 }
 
 /*
