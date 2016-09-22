@@ -353,13 +353,19 @@ struct kern_ipc_perm* checkbarrier(int tag,int bd){
 
 void awake_tag(struct barrier_tag* barrier_tag){
 
-        printk(KERN_INFO "Awaking tag:%d\n",barrier_tag->tag);
+        printk(KERN_INFO "Waking up tag:%d\n",barrier_tag->tag);
 
         /*
          * Pointer to an element of the list associated to the barrier_tag
          */
 
         struct process_queue* tag_list_element;
+
+        /*
+         * Head of wait queue in process
+         */
+
+        wait_queue_head_t* head;
 
         /*
          * It is necessary to set the value of the field "sleeping" (from the barrier_tag structure)
@@ -381,8 +387,13 @@ void awake_tag(struct barrier_tag* barrier_tag){
          * 1
          */
 
-        list_for_each_entry(tag_list_element,&barrier_tag->queues,queue_list)
-                wake_up(tag_list_element->queue);
+        list_for_each_entry(tag_list_element,&barrier_tag->queues,queue_list) {
+                head=&tag_list_element->queue;
+                if(!head->task_list.next)
+                        printk(KERN_INFO "Empty Entry address:%lu\n",head->task_list.next);
+                else
+                        wake_up(tag_list_element->queue);
+        }
 
         printk(KERN_INFO "Woken up tag:%d\n",barrier_tag->tag);
 
@@ -433,6 +444,12 @@ void freebarrier(struct kern_ipc_perm* perm){
         struct barrier_tag* tag;
 
         /*
+         * Temporary pointer used inside "list_for_each_entry_safe"
+         */
+
+        struct barrier_tag* temp;
+
+        /*
          * Get the barrier corresponding to the given permission object
          */
 
@@ -443,9 +460,13 @@ void freebarrier(struct kern_ipc_perm* perm){
         /*
          * Wake up processes sleeping on each tag and release objects associated to the
          * tags themselves
+         *
+         * Inside the loop we are going to delete barrier_tag structures (after processes sleeping on them
+         * have been woken up) so we need the "safe" version of "list_for_each_entry", which makes use of
+         * a futher pointer (second parameter) to save the address of the entry that is gonna be deleted
          */
 
-        list_for_each_entry(tag,&to_be_removed->tags,tag_list)
+        list_for_each_entry_safe(tag,temp,&to_be_removed->tags,tag_list)
                 awake_tag(tag);
 
         /*
@@ -454,7 +475,11 @@ void freebarrier(struct kern_ipc_perm* perm){
          * no longer reachable using the IPC identifier
          */
 
+        printk(KERN_INFO "Before removing id %d from idr\n",perm->id);
+
         ipc_rmid(barrier_ids,perm);
+
+        printk(KERN_INFO "Removed id %d from idr\n",perm->id);
 
         /*
          * Check if removed: we expect we can't find the entry in the idr
@@ -464,10 +489,10 @@ void freebarrier(struct kern_ipc_perm* perm){
 
         prova=idr_find(&barrier_ids->ipcs_idr,(perm->id) % IPCMNI);
 
-        if(!prova){
-                printk(KERN_INFO "Released barrier with id %d\n",perm->id);
-        }
-
+        if(!prova)
+                printk(KERN_INFO "Released id of barrier with id %d\n",perm->id);
+        else
+                printk(KERN_INFO "Couldn't find id %d\n",perm->id);
 
         /*
          * Release the lock on the permission object
@@ -475,11 +500,15 @@ void freebarrier(struct kern_ipc_perm* perm){
 
         barrier_unlock(to_be_removed);
 
+        printk(KERN_INFO "Unlocked barrier with id %d\n",perm->id);
+
         /*
          * Free memory assigned to the barrier
          */
 
         ipc_rcu_putref(to_be_removed);
+
+        printk(KERN_INFO "Removed barrier with id %d\n",perm->id);
 }
 
 /*
@@ -778,6 +807,7 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
          * Return the result of the preceding function as the result of the entire system call
          */
 
+        printk(KERN_INFO "System call sys_sleep_on_barrier returned this value:%d\n",ret);
         return ret;
         }
 
