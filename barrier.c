@@ -382,17 +382,12 @@ void awake_tag(struct barrier_tag* barrier_tag){
          * Scan the list of wait queues head and wake the single process sleeping on each of them
          * The "wake_up" function iterates through all the elements of the wait queue until they
          * have all woken up. In particular it invokes the "autoremove_wake_function" on each sleeping
-         * process: this function returns 1 when the process has woken up, 0 otherwise, so the "awaker"
-         * keeps trying to wake up processes until on all of them the "wake up" function has returned
-         * 1
+         * process: this function returns 1 when the process has woken up, 0 otherwise, so it keeps
+         * trying to wake up processes until on all of them the "wake up" function has returned 1
          */
 
         list_for_each_entry(tag_list_element,&barrier_tag->queues,queue_list) {
-                head=&tag_list_element->queue;
-                if(!head->task_list.next)
-                        printk(KERN_INFO "Empty Entry address:%lu\n",head->task_list.next);
-                else
-                        wake_up(tag_list_element->queue);
+                wake_up(tag_list_element->queue);
         }
 
         printk(KERN_INFO "Woken up tag:%d\n",barrier_tag->tag);
@@ -463,7 +458,7 @@ void freebarrier(struct kern_ipc_perm* perm){
          *
          * Inside the loop we are going to delete barrier_tag structures (after processes sleeping on them
          * have been woken up) so we need the "safe" version of "list_for_each_entry", which makes use of
-         * a futher pointer (second parameter) to save the address of the entry that is gonna be deleted
+         * a further pointer (second parameter) to save the address of the entry that is gonna be deleted
          */
 
         list_for_each_entry_safe(tag,temp,&to_be_removed->tags,tag_list)
@@ -802,6 +797,15 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
          */
 
         ret=wait_event_interruptible(queue_head,barrier_tag->sleeping);
+
+        /*
+         * In case of interrupt we have to clean the list of "process_queue" structure within the
+         * barrier_tag element
+         */
+
+        if(ret==-ERESTARTSYS){
+                list_del(&process_queue.queue_list);
+        }
 
         /*
          * Return the result of the preceding function as the result of the entire system call
