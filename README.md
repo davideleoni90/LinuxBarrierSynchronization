@@ -1,5 +1,4 @@
 # LinuxBarrierSynchronization
-Linux Kernel Programming project: add a new synchronization primitive to Linux Kernel 2.6.34
 <p align="justify">
 This application is the result of a didactic project for the
 <a href="http://www.dis.uniroma1.it/~quaglia/DIDATTICA/SO-II-6CRM/">
