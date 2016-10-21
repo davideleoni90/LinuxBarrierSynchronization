@@ -46,5 +46,5 @@ Here's the list of symbols, from header file <i>helper.h</i>:
 </ol>
 <br>
 Once this symbols have been initialised to their correct address, the module can be compiled and installed as any other module for the Linux Kernel.
-The module was tested on Linux Kernel 2.6.34, with full preemption and SMP support
+The module was tested on Linux Kernel 2.6.34, with full preemption and SMP support, on x86 machine
 </p>
