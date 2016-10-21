@@ -55,7 +55,7 @@ void barrier_unlock(struct barrier_struct* barrier){
 }
 
 /*
- * Dinamically create a "barrier_tag" element for the given tag
+ * Dynamically create a "barrier_tag" element for the given tag
  *
  * @tag: tag associated to the structure
  *
@@ -289,57 +289,6 @@ struct barrier_tag* findtag(struct barrier_struct* barrier,int tag){
 }
 
 /*
- * Get the permission object of the barrier associated to the provided IPC
- * identifier; also check the provided tag is valid.
- *
- * The permission object, whether found, is retuerned in a locked state
- *
- * This
- *
- * @bd: IPC identifier of the barrier that the process wants to use in order to synchronize
- *      with other processes
- * @tag: index of specific queue of the barrier onto which the process wants to sleep
- *
- * Returns:
- *
- * 1- the permission object requested, if one corresponding to the given IPC identifier exists
- * 2- -EINVAL in case the requested tag is not valid or no object corresponding to the IPC
- * identifier exists
- */
-
-struct kern_ipc_perm* checkbarrier(int tag,int bd){
-
-        /*
-         * The return value
-         */
-
-        struct kern_ipc_perm* ret;
-
-        /*
-         * Check if the provided tag is valid (less than 0<=tag<=31):
-         * if not, return -EINVAL
-         */
-
-        if(tag<0 || tag >31) {
-                ret=ERR_PTR(-EINVAL);
-                return ret;
-        }
-
-        /*
-         * Check if a permission object associated to the provided IPC identifier exists and, if so,
-         * return it in a locked state, otherwise return error code -EINVAL.
-         */
-
-        ret=ipc_lock_check(barrier_ids, bd);
-
-        /*
-         * Return the output of the function
-         */
-
-        return ret;
-}
-
-/*
  * This function wakes up all the processes sleeping on the synchronization level corresponding
  * to the given barrier_tag structure and then removes the last one from the associated list
  * of the barrier object
@@ -405,9 +354,8 @@ void awake_tag(struct barrier_tag* barrier_tag){
          * tag have been woken up => now we can remove the structure corresponding to the tag
          */
 
-        kfree(barrier_tag);
-
         printk(KERN_INFO "Removed tag structure:%d\n",barrier_tag->tag);
+        kfree(barrier_tag);
 }
 
 /*
@@ -1179,16 +1127,10 @@ int init_module(void) {
          * 2-sequence number is set to 0
          * 3-mutex is initialized
          * 4-idr subsystem (to manage ids) is initialized using the function
-         * "idr_init", which is part of its API
+         *   "idr_init", which is part of its API
          */
 
         ipc_init_ids(barrier_ids);
-
-        printk(KERN_INFO "Address of the ipc_ids:%lu\n",barrier_ids);
-
-        printk(KERN_INFO "First field of the ipc_ids:%d\n",*barrier_ids);
-
-        printk(KERN_INFO "Second field of the ipc_ids:%d\n",*(barrier_ids+4*sizeof(void*)));
 
         /*
          * Log message about our just inserted module
@@ -1236,10 +1178,6 @@ void cleanup_module(void) {
          */
 
         remove_ids();
-
-        printk(KERN_INFO "First field of the removed ipc_ids:%d\n",*barrier_ids);
-
-        printk(KERN_INFO "Second field of the removed ipc_ids:%d\n",*(barrier_ids+4*sizeof(void*)));
 
         printk(KERN_INFO "Released memory allocated for the structure ipc_ids at address %lu\n",barrier_ids);
 
