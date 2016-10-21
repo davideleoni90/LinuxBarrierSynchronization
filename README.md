@@ -10,11 +10,11 @@ The author of this project is <a href="https://www.linkedin.com/in/leonidavide">
 </p>
 <h2>Overview</h2>
 <p align="justify">
-This project is aimed at the introduction of a new synchronization system for the Linux Kernel: in order to introduce this new facility into the kernel, a dedicated module has been developed.
+This project is aimed at the creation of a new synchronization system for the Linux Kernel: in order to introduce this new facility into the kernel, a dedicated module has been developed.
 </p>
 <h2>Specifics</h2>
 <p align="justify">
-The new synchronization system resembles a <a href="https://en.wikipedia.org/wiki/Barrier_%28computer_science%29">synchronization barrier</a> but is also capable of handling <i> 32 synchronization TAGs</i> (from 0 to 31), thus it is possible to synchronize groups of processes with different level of priorities instantiating a single barrier. Similarly to any barrier, processes are synchronized by putting them to sleep until a certain event happens or a condition is verified: here processes wake up when an explicit request is made by another process. It is possible to select the processes to wake up by mean of the TAG so that only the process which were synchronized on the corresponding priority level get back to normal execution. Moreover, in case a process receives an interrupt, it has to recognize that it has been waken up not because of synchorinzation needs (a process requested to wake up all the processes with its TAG), but because the operating system had to notify him an event.
+The new synchronization system resembles a <a href="https://en.wikipedia.org/wiki/Barrier_%28computer_science%29">synchronization barrier</a> but is also capable of handling <i> 32 synchronization TAGs</i> (from 0 to 31), thus it is possible to synchronize groups of processes with different level of priorities instantiating a single barrier. Similarly to any barrier, processes are synchronized by putting them to sleep until a certain event happens or a condition is verified: here processes wake up when an explicit request is made by another process. It is possible to select the processes to wake up by mean of the TAG so that only the process which were synchronized on the corresponding priority level get back to normal execution. Moreover, in case a process receives an interrupt, it has to recognize that it has been waken up not because of synchronization needs (a process requested to wake up all the processes with its TAG), but because the operating system had to notify him an event.
 <br>
 The interface of the new synchronization system (namely the new system calls that have to be provided by the kernel) is the following:
 <ol type="1">
@@ -26,9 +26,9 @@ The interface of the new synchronization system (namely the new system calls tha
 </p>
 <h2>Implementation</h2>
 <p align="justify">
-Every time a process has to be synchronized on a barrier at a certain priority level, a <i>wait-queue</i> is allocated in its own Kernel mode stack and it goes to sleep on it; the address of the wait-queue is stored in a list whose head is kept in the data structure associated to the barrier, so that it is possible to properly awake the process when the <i>awake_barrier</i> system call is invoked. This solution exploits the memory of the Kernel mode stack, which is statically allocated to a process, thus avoiding to request memory dynamically to the operating system for each synchronization tag (besides the memory necessary to store the data structure associated to the barrier, containing a minimal list of addresses of wait queues). As a consequence, optimal memory usage and scalability are achieved.
+Every time a process has to be synchronized on a barrier at a certain priority level, a <i>wait-queue</i> is allocated in its own Kernel mode stack and it goes to sleep on it; the address of the wait-queue is stored in a list whose head is kept in the data structure associated to the barrier, so that it is possible to properly awake the process when the <i>awake_barrier</i> system call is invoked. This solution exploits the memory of the Kernel mode stack, which is statically allocated to a process, thus avoiding to request memory dynamically to the operating system for each synchronization tag (besides the memory necessary to store the data structure associated to the barrier, containing a minimal list of addresses of wait queues). As a consequence, better memory usage and scalability are achieved.
 <br>
-In order to provide a robust handling of the IDs associated to the barriers, this module makes of uses of many functions natively used by the Linux Kernel for the IPC subsystem(see <i>"How to use"</i>). This comes at the price of finding the addresses of a few more kernel functions before compiling the module.
+In order to provide a robust handling of the IDs associated to the barriers, this module makes use of many functions natively used by the Linux Kernel for the IPC subsystem (see <i>"How to use"</i>). This comes at the price of finding the addresses of a few more kernel functions before compiling the module.
 </p>
 <h2>How to use</h2>
 <p align="justify">
