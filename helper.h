@@ -104,15 +104,23 @@ unsigned long* system_call_table;
 
 unsigned int restore[4];
 
-void make_page_writable(pte_t* page);
-
 /*
  * Find address of the system call table
  */
 
 unsigned long* find_system_call_table(void);
 
+/*
+ * Find entries in the system call table corresponding to not implemented
+ * system calls
+ */
+
 void find_free_syscalls(unsigned long* table, unsigned int* restore);
+
+/*
+ * Enable and disable write-protected mode
+ */
+
 void enable_write_protected_mode(unsigned long* cr0);
 void disable_write_protected_mode(unsigned long* cr0);
 

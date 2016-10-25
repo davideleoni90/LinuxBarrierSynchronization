@@ -127,7 +127,7 @@ void find_free_syscalls(unsigned long* table, unsigned int* restore){
 
         int i=0,j=0;
         while(i<NR_syscalls){
-                printk(KERN_INFO "Address %lu, Content %lu\n",&(table[i]),table[i]);
+                //printk(KERN_INFO "Address %lu, Content %lu\n",&(table[i]),table[i]);
                 if(table[i]==not_implemented_syscall){
                         restore[j]=i;
                         printk(KERN_INFO "System call at address %lu to be replaced\n",&(table[i]));
@@ -166,7 +166,6 @@ void disable_write_protected_mode(unsigned long* cr0){
          * write-protected mode
          */
 
-        printk(KERN_INFO "CR0 %lu\n",*cr0);
         write_cr0(*cr0 &~WP_X86);
 }
 

@@ -77,7 +77,7 @@ struct barrier_tag* newtag(int tag){
 
         new_tag=kmalloc(sizeof(struct barrier_tag),GFP_KERNEL);
 
-        printk(KERN_INFO "Address of the tag number %d:%lu\n",tag,new_tag);
+        printk(KERN_INFO "BARRIER_MODULE->Address of the tag number %d:%lu\n",tag,new_tag);
 
         /*
          * Check if the barrier_tag object has been successfully allocated: if not,
@@ -162,7 +162,7 @@ int newbarrier(struct ipc_namespace* ns, struct ipc_params* params){
 
         barrier = ipc_rcu_alloc(sizeof(*barrier));
 
-        printk(KERN_INFO "Address of the barrier with key %d:%lu\n",key,barrier);
+        printk(KERN_INFO "BARRIER_MODULE->Address of the barrier with key %d:%lu\n",key,barrier);
 
         /*
          * Return error in case there's not enough memory left
@@ -302,7 +302,7 @@ struct barrier_tag* findtag(struct barrier_struct* barrier,int tag){
 
 void awake_tag(struct barrier_tag* barrier_tag){
 
-        printk(KERN_INFO "Waking up tag:%d\n",barrier_tag->tag);
+        printk(KERN_INFO "BARRIER_MODULE->Waking up tag:%d\n",barrier_tag->tag);
 
         /*
          * Pointer to an element of the list associated to the barrier_tag
@@ -339,7 +339,7 @@ void awake_tag(struct barrier_tag* barrier_tag){
                 wake_up(tag_list_element->queue);
         }
 
-        printk(KERN_INFO "Woken up tag:%d\n",barrier_tag->tag);
+        printk(KERN_INFO "BARRIER_MODULE->Woken up tag:%d\n",barrier_tag->tag);
 
         /*
          * Remove the structure associated to this tag from the corresponding list of the barrier
@@ -347,14 +347,13 @@ void awake_tag(struct barrier_tag* barrier_tag){
 
         list_del(&barrier_tag->tag_list);
 
-        printk(KERN_INFO "Removed tag structure from list of tags:%d\n",barrier_tag->tag);
+        printk(KERN_INFO "BARRIER_MODULE->Removed tag structure from list of tags:%d\n",barrier_tag->tag);
 
         /*
          * Once we exit the above loop, we can be sure that all the processes synchronized on the current
          * tag have been woken up => now we can remove the structure corresponding to the tag
          */
 
-        printk(KERN_INFO "Removed tag structure:%d\n",barrier_tag->tag);
         kfree(barrier_tag);
 }
 
@@ -398,7 +397,7 @@ void freebarrier(struct kern_ipc_perm* perm){
 
         to_be_removed=container_of(perm,struct barrier_struct,barrier_perm);
 
-        printk(KERN_INFO "Releasing barrier with id %d at address %lu\n",perm->id,to_be_removed);
+        printk(KERN_INFO "BARRIER_MODULE->Releasing barrier with id %d at address %lu\n",perm->id,to_be_removed);
 
         /*
          * Wake up processes sleeping on each tag and release objects associated to the
@@ -418,11 +417,11 @@ void freebarrier(struct kern_ipc_perm* perm){
          * no longer reachable using the IPC identifier
          */
 
-        printk(KERN_INFO "Before removing id %d from idr\n",perm->id);
+        printk(KERN_INFO "BARRIER_MODULE->Before removing id %d from idr\n",perm->id);
 
         ipc_rmid(barrier_ids,perm);
 
-        printk(KERN_INFO "Removed id %d from idr\n",perm->id);
+        printk(KERN_INFO "BARRIER_MODULE->Removed id %d from idr\n",perm->id);
 
         /*
          * Check if removed: we expect we can't find the entry in the idr
@@ -433,9 +432,9 @@ void freebarrier(struct kern_ipc_perm* perm){
         prova=idr_find(&barrier_ids->ipcs_idr,(perm->id) % IPCMNI);
 
         if(!prova)
-                printk(KERN_INFO "Released id of barrier with id %d\n",perm->id);
+                printk(KERN_INFO "BARRIER_MODULE->Released id of barrier with id %d\n",perm->id);
         else
-                printk(KERN_INFO "Couldn't find id %d\n",perm->id);
+                printk(KERN_INFO "BARRIER_MODULE->Couldn't find id %d\n",perm->id);
 
         /*
          * Release the lock on the permission object
@@ -443,7 +442,7 @@ void freebarrier(struct kern_ipc_perm* perm){
 
         barrier_unlock(to_be_removed);
 
-        printk(KERN_INFO "Unlocked barrier with id %d\n",perm->id);
+        printk(KERN_INFO "BARRIER_MODULE->Unlocked barrier with id %d\n",perm->id);
 
         /*
          * Free memory assigned to the barrier
@@ -451,7 +450,7 @@ void freebarrier(struct kern_ipc_perm* perm){
 
         ipc_rcu_putref(to_be_removed);
 
-        printk(KERN_INFO "Removed barrier with id %d\n",perm->id);
+        printk(KERN_INFO "BARRIER_MODULE->Removed barrier with id %d\n",perm->id);
 }
 
 /*
@@ -479,7 +478,7 @@ int idr_iterate_callback (int id, void *p, void *data){
 
         perm=(struct kern_ipc_perm*)p;
 
-        printk(KERN_INFO "Bbarrier id :%d\n",perm->id);
+        printk(KERN_INFO "BARRIER_MODULE->Barrier id :%d\n",perm->id);
 
         /*
          * Acquire the lock on the permission object pointed by p
@@ -531,11 +530,15 @@ void remove_ids(void){
          * and applies to them the callback function given as second parameter; the third
          * parameter represents further data that can be passed to the callback function, but
          * we don't need it
+         *
+         * SHOULD NOT EXECUTE NO ITERATION: actually we wait for barriers to be release before
+         * allowing the removal of the module, so when we get here all barrier instances should
+         * have already been released.
          */
 
         idr_for_each(&barrier_ids->ipcs_idr,idr_iterate_callback,NULL);
 
-        printk(KERN_INFO "All barriers removed\n");
+        printk(KERN_INFO "BARRIER_MODULE->All barriers removed\n");
 
         /*
          * Once the above function has finished its task, there are no more instances of barrier
@@ -652,7 +655,7 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
         barrier_tag=findtag(barrier,tag);
         if(!barrier_tag){
 
-                printk(KERN_INFO "Creating struct barrier_tag for tag:%d\n",tag);
+                printk(KERN_INFO "BARRIER_MODULE->Creating struct barrier_tag for tag:%d\n",tag);
 
                 /*
                  * Allocate a new barrier_tag to handle the synchronization tag
@@ -673,7 +676,7 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
 
                 }
 
-                printk(KERN_INFO "Adding tag %d to list\n",tag);
+                printk(KERN_INFO "BARRIER_MODULE->Adding tag %d to list\n",tag);
 
                 /*
                  * Add the newly created barrier_tag to the list of tags from the
@@ -682,7 +685,7 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
 
                 list_add(&barrier_tag->tag_list,&barrier->tags);
 
-                printk(KERN_INFO "Added tag %d to list\n",tag);
+                printk(KERN_INFO "BARRIER_MODULE->Added tag %d to list\n",tag);
         }
 
         /*
@@ -718,7 +721,7 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
 
         list_add(&process_queue.queue_list,&barrier_tag->queues);
 
-        printk(KERN_INFO "Adding process to list of tag %d: the address is %lu\n",tag,process_queue);
+        printk(KERN_INFO "BARRIER_MODULE->Adding process to list of tag %d: the address is %lu\n",tag,process_queue);
 
         /*
          * Increment the counter of the "barrier_tag" structure because this process is now sleeping
@@ -752,16 +755,25 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
          */
 
         if(ret==-ERESTARTSYS){
+
+                /*
+                 * Return -EINTR if the system call gets interrupted, because -ERESTARTSYS would not
+                 * be visible to the User Process and is used by the kernel for internal use to specify
+                 * whether an interrupted system call should be reissued after the signal handler
+                 * termination
+                 */
+
                 list_del(&process_queue.queue_list);
+                ret=-EINTR;
         }
 
         /*
-         * Return the result of the preceding function as the result of the entire system call
+         * Return the outcome of the system call
          */
 
         printk(KERN_INFO "System call sys_sleep_on_barrier returned this value:%d\n",ret);
         return ret;
-        }
+}
 
 /*
  * Wake up all the processes synchronized on a certain tag of the barrier corresponding to the
@@ -771,7 +783,7 @@ asmlinkage long sys_sleep_on_barrier(int bd,int tag){
  *      with other processes
  * @tag: index of specific queue of the barrier onto which the process wants to sleep
  *
- * Returns:
+ * Returns an error code in case something went wrong, 0 otherwise
  */
 
 asmlinkage long sys_awake_barrier(int bd,int tag){
@@ -911,6 +923,12 @@ asmlinkage long sys_get_barrier(key_t key,int flags){
         int ret;
 
         /*
+         * Number of barrier instantiated before getting a new one
+         */
+
+        int in_use;
+
+        /*
          * Parameters to be passed to the "ipcget" function
          */
 
@@ -939,33 +957,58 @@ asmlinkage long sys_get_barrier(key_t key,int flags){
          * "ipc_check_perms"
          */
 
-        ops.associate =barrier_security;
+        ops.associate = barrier_security;
         ops.more_checks = NULL;
 
         /*
-         * The two parameters to
+         * The two parameters to request for a new barrier
          */
 
         params.key = key;
         params.flg = flags;
 
-        printk(KERN_INFO "System call sys_get_barrier invoked with params: key=%d flags=%d\n",key,flags);
+        printk(KERN_INFO "System call sys_get_barrier invoked with params: key=%d flags=%d\n", key, flags);
+
+        /*
+         * Get actual number of barriers
+         */
+
+        in_use=barrier_ids->in_use;
+
+        printk(KERN_INFO "BARRIER_MODULE->Number of barriers before invoking \"ipcget\":%d\n",in_use);
 
         /*
          * Get a new barrier synchronization object using the above parameters
          */
 
-        ret=ipcget(ns, barrier_ids, &ops, &params);
+        ret = ipcget(ns, barrier_ids, &ops, &params);
 
-        printk(KERN_INFO "System call sys_get_barrier returned this value:%d\n",ret);
+        printk(KERN_INFO "BARRIER_MODULE->Number of barriers after invoking \"ipcget\":%d\n",barrier_ids->in_use);
+
+        /*
+         * If a new barrier is successfully instantiated, increase the usage counter of the current
+         * module: this prevent the module from being removed while some processes are using it (i.e.
+         * there is at least one instance of barrier). The counter will be decreased when the barrier
+         * is released.
+         */
+
+        if(barrier_ids->in_use>in_use){
+
+                /*
+                 * Increment module counter because there's a new instance of barrier in the system
+                 */
+
+                printk(KERN_INFO "Incrementing usage counter:%d and %d\n",ret,key);
+                try_module_get(THIS_MODULE);
+        }
+
+        printk(KERN_INFO "System call sys_get_barrier returned this value:%d\n", ret);
 
         /*
          * Return the result of the system call
          */
 
         return ret;
-
-
 }
 
 /*
@@ -1024,7 +1067,9 @@ asmlinkage long sys_release_barrier(int bd){
                 return ret;
         }
 
+        printk(KERN_INFO "BARRIER_MODULE->Number of barriers after invoking \"freebarrier\":%d\n",barrier_ids->in_use);
         freebarrier(barrier_perm);
+        printk(KERN_INFO "BARRIER_MODULE->Number of barriers after invoking \"freebarrier\":%d\n",barrier_ids->in_use);
 
         /*
          * Release the mutex of the ipc_ids structure
@@ -1040,6 +1085,13 @@ asmlinkage long sys_release_barrier(int bd){
 
 
         printk(KERN_INFO "System call sys_release_barrier returned this value:%d\n",ret);
+
+        /*
+         * One more thing to do: decrease the usage counter of the module, otherwise it won't
+         * be ever possible to remove it
+         */
+
+        module_put(THIS_MODULE);
 
         /*
          * Return 0
@@ -1136,7 +1188,7 @@ int init_module(void) {
          * Log message about our just inserted module
          */
 
-        printk(KERN_INFO "Module \"barrier_module\" inserted: index of replaced system calls:%d,%d,%d,%d\n",restore[0],restore[1],restore[2],restore[3]);
+        printk(KERN_INFO "Module \"barrier_module\" inserted: index of replaced system calls\nsys_get_barrier:%d\nsys_sleep_on_barrier:%d\nsys_awake_barrier:%d\nsys_release_barrier:%d\n",restore[0],restore[1],restore[2],restore[3]);
         return 0;
 
 }
@@ -1179,7 +1231,7 @@ void cleanup_module(void) {
 
         remove_ids();
 
-        printk(KERN_INFO "Released memory allocated for the structure ipc_ids at address %lu\n",barrier_ids);
+        printk(KERN_INFO "BARRIER_MODULE->Released memory allocated for the structure ipc_ids at address %lu\n",barrier_ids);
 
         printk(KERN_INFO "Module \"barrier_module\" removed\n");
 

@@ -37,19 +37,12 @@
 
 /*
  * Kernel service routine to get the an instance of a barrier.
- * Paremeters:
+ * Parameters:
  * 1- key_t key: used to uniquely identify the instance of the barrier
  * 2- int flags: flags to define the action to perform on the barrier
  */
 
 asmlinkage long sys_get_barrier(key_t key,int flags);
-
-/*
- * Initialize the "ids_namespace" structure to be used to handle ids of the
- * varieous instances of the barrier
- */
-
-//void ipc_init_ids(struct ipc_ids *);
 
 /*
  * Simplified custom version of the "kern_ipc_perm" structure used by

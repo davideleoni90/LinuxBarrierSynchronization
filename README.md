@@ -4,7 +4,6 @@ This application is the result of a didactic project for the
 <a href="http://www.dis.uniroma1.it/~quaglia/DIDATTICA/SO-II-6CRM/">
 Operating Systems 2</a> course of the Master of Science of
 Engineering in Computer Science at <a href="http://cclii.dis.uniroma1.it/?q=it/msecs">Sapienza University of Rome</a>.
-<br>
 The author of this project is <a href="https://www.linkedin.com/in/leonidavide">Davide Leoni</a>
 </p>
 <h2>Overview</h2>
@@ -28,6 +27,9 @@ The interface of the new synchronization system (namely the new system calls tha
 Every time a process has to be synchronized on a barrier at a certain priority level, a <i>wait-queue</i> is allocated in its own Kernel mode stack and it goes to sleep on it; the address of the wait-queue is stored in a list whose head is kept in the data structure associated to the barrier, so that it is possible to properly awake the process when the <i>awake_barrier</i> system call is invoked. This solution exploits the memory of the Kernel mode stack, which is statically allocated to a process, thus avoiding to request memory dynamically to the operating system for each synchronization tag (besides the memory necessary to store the data structure associated to the barrier, containing a minimal list of addresses of wait queues). As a consequence, better memory usage and scalability are achieved.
 <br>
 In order to provide a robust handling of the IDs associated to the barriers, this module makes use of many functions natively used by the Linux Kernel for the IPC subsystem (see <i>"How to use"</i>). This comes at the price of finding the addresses of a few more kernel functions before compiling the module.
+<br>
+The usage counter of the module is incremented every time a new instance of barrier is successfully created: this prevents the module from being removed while some barriers are still in place. As a consequence, <b>it is necessary to release all the allocated barriers otherwise
+it won't be possible to remove the module (and a system restart will be necessary)</b>
 </p>
 <h2>How to use</h2>
 <p align="justify">
@@ -47,4 +49,6 @@ Here's the list of symbols, from header file <i>helper.h</i>:
 <br>
 Once this symbols have been initialised to their correct address, the module can be compiled and installed as any other module for the Linux Kernel.
 The module was tested on Linux Kernel 2.6.34, with full preemption and SMP support, on x86 machine
+<br>
+The folder <i>UseCases</i> features some examples of usage of the module. Before using them, it is necessary to insert the compiled module into the kernel and then set the number of newly installed system calls into the header <i>barrier_user.h</i> (after the module has been inserted, the number of the newly installed system calls can be read from the kernel log using the command <i>dmesg</i>).
 </p>
